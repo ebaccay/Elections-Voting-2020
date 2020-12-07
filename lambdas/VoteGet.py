@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import json
 import boto3
 import traceback
+import hashlib
 
 ddb = boto3.resource("dynamodb")
 
@@ -54,7 +55,7 @@ class RankedElection:
     tied_race = "TIED RACE"
 
     def __init__(self, raw_ballots):
-        self.rounds = 0
+        self.rounds = []
         self.margin = None
         self.winner = None
         self.time = None
@@ -68,7 +69,7 @@ class RankedElection:
     def tabulate(self):
         try:
             self.__tabulate__()
-        except RecursionError:
+        except ZeroDivisionError:
             self.margin = int(self.total / 2)
             self.winner = self.tied_race
             self.time = str(datetime.utcnow() - timedelta(hours=8))
@@ -88,9 +89,11 @@ class RankedElection:
         potential_winner = max(tally.keys(), key=lambda x: tally[x])
         winning_margin = tally[potential_winner] / self.total
 
-        self.rounds += 1
+        self.rounds.append(tally)
 
         if winning_margin <= self.required_margin:
+            if self.tally and self.tally[-1] == tally:
+                1/0
             eliminated_candidate = min(tally.keys(), key=lambda x: tally[x])
             self.eliminate(eliminated_candidate)
             return self.tabulate()
@@ -118,6 +121,16 @@ def lambda_handler(event, context):
 
 def main(event, context):
     query = event["queryStringParameters"]
+    headers = event["headers"]
+
+    if "tabulation-key" not in headers:
+        return create_response(403, "Forbidden")
+
+    # lol this is such bad practice never do this pls
+    # always obfuscate away your keys to environment variables kids
+    if create_hash(headers["tabulation-key"]) != 'e47829abf456bfdc0aa05f0bdf73ec05cd95':
+        # if headers["tabulation-key"] != "lol this is a temp pw don't get used to it":
+        return create_response(403, "Forbidden")
 
     # Verify that request is valid
     if not verify_request(query):
@@ -143,7 +156,7 @@ def main(event, context):
         "margin": election.margin,
         "total": election.total,
         "tabulationTime": election.time,
-        "numRounds": election.rounds
+        "rounds": election.rounds
     }
 
     return create_response(200, "Tabulation completed!", payload)
@@ -158,6 +171,11 @@ def verify_request(body):
         return False
 
     return True
+
+
+def create_hash(*args):
+    arg_string = "".join([str(arg) for arg in args])
+    return hashlib.sha256(arg_string.encode()).hexdigest()[:36]
 
 
 def create_response(status_code, message, body=None):
